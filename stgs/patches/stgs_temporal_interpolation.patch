@@ -1,0 +1,85 @@
+--- a/train.py
++++ b/train.py
+@@ -110,6 +110,7 @@
+         traincamdict = {}
+         for i in range(duration): # 0 to 4, -> (0.0, to 0.8)
+             traincamdict[i] = [cam for cam in traincameralist if cam.timestamp == i/duration]
++        traintimes = [i for i in range(duration) if len(traincamdict[i]) > 0] # all frames unless --train_stride > 1
+     
+     
+     if gaussians.ts is None :
+@@ -170,7 +171,7 @@
+ 
+         if opt.batch > 1:
+             gaussians.zero_gradient_cache()
+-            timeindex = randint(0, duration-1) # 0 to 49
++            timeindex = random.choice(traintimes) # 0 to 49
+             viewpointset = traincamdict[timeindex]
+             camindex = random.sample(viewpointset, opt.batch)
+ 
+@@ -401,6 +402,7 @@
+ 
+     args, lp_extract, op_extract, pp_extract = getparser()
+     setgtisint8(op_extract.gtisint8)
++    random.seed(6666); np.random.seed(6666); torch.manual_seed(6666); torch.cuda.manual_seed_all(6666) # same seed as 4DGS runs
+     train(lp_extract, op_extract, pp_extract, args.save_iterations, args.debug_from, densify=args.densify, duration=args.duration, rgbfunction=args.rgbfunction, rdpip=args.rdpip)
+ 
+     # All done
+--- a/thirdparty/gaussian_splatting/scene/dataset_readers.py
++++ b/thirdparty/gaussian_splatting/scene/dataset_readers.py
+@@ -762,7 +762,7 @@
+ 
+ 
+ 
+-def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duration=50):
++def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duration=50, train_stride=1, initply=""):
+     try:
+         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+@@ -808,6 +808,10 @@
+         train_cam_infos = cam_infos
+         test_cam_infos = cam_infos[:2] #dummy
+ 
++    if train_stride > 1: # temporal interpolation: train only on frames idx % k == 0
++        train_cam_infos = [c for c in train_cam_infos if int(round(c.timestamp * duration)) % train_stride == 0]
++        print("train frames:", sorted({int(round(c.timestamp * duration)) for c in train_cam_infos}))
++
+     nerf_normalization = getNerfppNorm(train_cam_infos)
+ 
+     ply_path = os.path.join(path, "sparse/0/points3D.ply")
+@@ -815,6 +819,9 @@
+     txt_path = os.path.join(path, "sparse/0/points3D.txt")
+     totalply_path = os.path.join(path, "sparse/0/points3D_total" + str(duration) + ".ply")
+     
++    if initply: # explicit init cloud, skip the all-frame merge
++        totalply_path = initply
++        assert os.path.exists(totalply_path), totalply_path
+ 
+     
+     if not os.path.exists(totalply_path):
+--- a/thirdparty/gaussian_splatting/scene/__init__.py
++++ b/thirdparty/gaussian_splatting/scene/__init__.py
+@@ -47,7 +47,8 @@
+ 
+ 
+         if loader == "colmap" or loader == "colmapvalid": # colmapvalid only for testing
+-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, multiview, duration=duration)
++            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, multiview, duration=duration,
++                train_stride=getattr(args, "train_stride", 1), initply=getattr(args, "initply", ""))
+         
+         elif loader == "technicolor" or loader == "technicolorvalid" :
+             scene_info = sceneLoadTypeCallbacks["Technicolor"](args.source_path, args.images, args.eval, multiview, duration=duration)
+--- a/thirdparty/gaussian_splatting/arguments/__init__.py
++++ b/thirdparty/gaussian_splatting/arguments/__init__.py
+@@ -70,8 +70,10 @@
+         self.data_device = "cuda"
+         self.veryrify_llff = 0
+         self.eval = False
+-        self.model = "gmodel" # 
++        self.model = "gmodel" #
+         self.loader = "colmap" #
++        self.train_stride = 1 # k: train on frames idx % k == 0 (colmap loader only)
++        self.initply = "" # init point cloud (x,y,z,t ply); empty = points3D_total<duration>.ply
+         
+ 
+ 
