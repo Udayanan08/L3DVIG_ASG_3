@@ -1,0 +1,267 @@
+diff --git a/arguments/__init__.py b/arguments/__init__.py
+index 7f2e8d6..be0d236 100644
+--- a/arguments/__init__.py
++++ b/arguments/__init__.py
+@@ -58,6 +58,12 @@ class ModelParams(ParamGroup):
+         self.add_points=False
+         self.extension=".png"
+         self.llffhold=8
++        self.train_stride=1      # k: train on frames idx % k == 0 (dynerf only)
++        self.num_frames=300      # frames per camera used (dynerf only)
++        self.time_denom=300.0    # t = frame / time_denom (dynerf only)
++        self.train_stride=1      # k: train on frames idx % k == 0 (dynerf only)
++        self.num_frames=300      # frames per camera used (dynerf only)
++        self.time_denom=300.0    # t = frame / time_denom (dynerf only)
+         super().__init__(parser, "Loading Parameters", sentinel)
+ 
+     def extract(self, args):
+diff --git a/arguments/dynerf/coffee_martini_a3.py b/arguments/dynerf/coffee_martini_a3.py
+new file mode 100644
+index 0000000..5113e7b
+--- /dev/null
++++ b/arguments/dynerf/coffee_martini_a3.py
+@@ -0,0 +1,9 @@
++_base_ = './default.py'
++ModelHiddenParams = dict(
++    kplanes_config = {
++        'grid_dimensions': 2,
++        'input_coordinate_dim': 4,
++        'output_coordinate_dim': 16,
++        'resolution': [64, 64, 64, 25],
++    },
++)
+diff --git a/arguments/dynerf/coffee_martini_smoke.py b/arguments/dynerf/coffee_martini_smoke.py
+new file mode 100644
+index 0000000..0950fa3
+--- /dev/null
++++ b/arguments/dynerf/coffee_martini_smoke.py
+@@ -0,0 +1,3 @@
++_base_ = './coffee_martini_a3.py'
++OptimizationParams = dict(iterations=400, coarse_iterations=100,
++                          densify_from_iter=100, densify_until_iter=300, pruning_from_iter=100)
+diff --git a/scene/__init__.py b/scene/__init__.py
+index e298d59..40c4e1f 100644
+--- a/scene/__init__.py
++++ b/scene/__init__.py
+@@ -50,7 +50,8 @@ class Scene:
+             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.extension)
+             dataset_type="blender"
+         elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")):
+-            scene_info = sceneLoadTypeCallbacks["dynerf"](args.source_path, args.white_background, args.eval)
++            scene_info = sceneLoadTypeCallbacks["dynerf"](args.source_path, args.white_background, args.eval,
++                train_stride=args.train_stride, num_frames=args.num_frames, time_denom=args.time_denom)
+             dataset_type="dynerf"
+         elif os.path.exists(os.path.join(args.source_path,"dataset.json")):
+             scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, False, args.eval)
+diff --git a/scene/dataset_readers.py b/scene/dataset_readers.py
+index 8a6cc42..093309a 100644
+--- a/scene/dataset_readers.py
++++ b/scene/dataset_readers.py
+@@ -438,48 +438,28 @@ def add_points(pointsclouds, xyz_min, xyz_max):
+     return pointsclouds
+     # breakpoint()
+     # new_
+-def readdynerfInfo(datadir,use_bg_points,eval):
++def readdynerfInfo(datadir,use_bg_points,eval,train_stride=1,num_frames=300,time_denom=300.0):
+     # loading all the data follow hexplane format
+-    # ply_path = os.path.join(datadir, "points3D_dense.ply")
+     ply_path = os.path.join(datadir, "points3D_downsample2.ply")
+     from scene.neural_3D_dataset_NDC import Neural3D_NDC_Dataset
+-    train_dataset = Neural3D_NDC_Dataset(
+-    datadir,
+-    "train",
+-    1.0,
+-    time_scale=1,
+-    scene_bbox_min=[-2.5, -2.0, -1.0],
+-    scene_bbox_max=[2.5, 2.0, 1.0],
+-    eval_index=0,
+-        )    
+-    test_dataset = Neural3D_NDC_Dataset(
+-    datadir,
+-    "test",
+-    1.0,
+-    time_scale=1,
+-    scene_bbox_min=[-2.5, -2.0, -1.0],
+-    scene_bbox_max=[2.5, 2.0, 1.0],
+-    eval_index=0,
+-        )
++    common = dict(time_scale=1, scene_bbox_min=[-2.5, -2.0, -1.0], scene_bbox_max=[2.5, 2.0, 1.0],
++                  eval_index=0, num_frames=num_frames, time_denom=time_denom, train_stride=train_stride)
++    # train: the 17 training cameras at frames idx % k == 0
++    train_dataset = Neural3D_NDC_Dataset(datadir, "train", 1.0, frame_subset="train", **common)
++    # test: held-out camera (cam00) at the midpoint frames (only used for logging during training)
++    test_dataset = Neural3D_NDC_Dataset(datadir, "test", 1.0,
++                                        frame_subset="test" if train_stride > 1 else "all", **common)
+     train_cam_infos = format_infos(train_dataset,"train")
+     val_cam_infos = format_render_poses(test_dataset.val_poses,test_dataset)
+     nerf_normalization = getNerfppNorm(train_cam_infos)
+-
+-    # xyz = np.load
+     pcd = fetchPly(ply_path)
+-    print("origin points,",pcd.points.shape[0])
+-    
+-    print("after points,",pcd.points.shape[0])
+-
+-    scene_info = SceneInfo(point_cloud=pcd,
+-                           train_cameras=train_dataset,
+-                           test_cameras=test_dataset,
+-                           video_cameras=val_cam_infos,
+-                           nerf_normalization=nerf_normalization,
+-                           ply_path=ply_path,
+-                           maxtime=300
+-                           )
+-    return scene_info
++    print("init points,",pcd.points.shape[0])
++    tr_f, te_f = set(train_dataset.image_frames), set(test_dataset.image_frames)
++    print("train frames:", sorted(tr_f), "| held-out cam frames:", sorted(te_f))
++    assert train_stride == 1 or not (tr_f & te_f), "train/test frame overlap"
++    return SceneInfo(point_cloud=pcd, train_cameras=train_dataset, test_cameras=test_dataset,
++                     video_cameras=val_cam_infos, nerf_normalization=nerf_normalization,
++                     ply_path=ply_path, maxtime=num_frames)
+ 
+ def setup_camera(w, h, k, w2c, near=0.01, far=100):
+     from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
+diff --git a/scene/neural_3D_dataset_NDC.py b/scene/neural_3D_dataset_NDC.py
+index 36a2ded..b0f5919 100644
+--- a/scene/neural_3D_dataset_NDC.py
++++ b/scene/neural_3D_dataset_NDC.py
+@@ -224,6 +224,10 @@ class Neural3D_NDC_Dataset(Dataset):
+         eval_step=1,
+         eval_index=0,
+         sphere_scale=1.0,
++        num_frames=300,        # number of frames per camera to use (assignment: 50)
++        time_denom=300.0,      # t = frame_idx / time_denom (assignment: 50.0)
++        train_stride=1,        # k: train frames are idx % k == 0
++        frame_subset="all",    # "train" | "test" | "all"
+     ):
+         self.img_wh = (
+             int(1352 / downsample),
+@@ -241,6 +245,10 @@ class Neural3D_NDC_Dataset(Dataset):
+         self.bd_factor = bd_factor
+         self.eval_step = eval_step
+         self.eval_index = eval_index
++        self.num_frames = num_frames
++        self.time_denom = float(time_denom)
++        self.train_stride = train_stride
++        self.frame_subset = frame_subset
+         self.blender2opencv = np.eye(4)
+         self.transform = T.ToTensor()
+ 
+@@ -301,69 +309,53 @@ class Neural3D_NDC_Dataset(Dataset):
+         render_poses = self.val_poses
+         render_times = torch.linspace(0.0, 1.0, render_poses.shape[0]) * 2.0 - 1.0
+         return render_poses, self.time_scale * render_times
+-    def load_images_path(self,videos,split):
+-        image_paths = []
+-        image_poses = []
+-        image_times = []
++
++    def frame_selected(self, idx):
++        """Decide whether frame idx belongs to the requested subset.
++        train: idx % k == 0
++        test : midpoints strictly between two train frames (idx % k == k//2, idx < last train frame)
++        all  : every frame
++        """
++        k = self.train_stride
++        last_train = ((self.num_frames - 1) // k) * k
++        is_train = (idx % k == 0)
++        is_test = (k > 1) and (idx % k == k // 2) and (idx < last_train)
++        if self.frame_subset == "train":
++            return is_train
++        if self.frame_subset == "test":
++            return is_test
++        return True
++
++    def load_images_path(self, videos, split):
++        image_paths, image_poses, image_times = [], [], []
++        self.image_frames, self.image_cams = [], []
+         N_cams = 0
+-        N_time = 0
+-        countss = 300
+         for index, video_path in enumerate(videos):
+-            
++            # eval camera is only used in the "test" split, never in "train"
+             if index == self.eval_index:
+-                if split =="train":
++                if split == "train":
+                     continue
+             else:
+                 if split == "test":
+                     continue
+-            N_cams +=1
+-            count = 0
+-            video_images_path = video_path.split('.')[0]
+-            image_path = os.path.join(video_images_path,"images")
+-            video_frames = cv2.VideoCapture(video_path)
+-            if not os.path.exists(image_path):
+-                print(f"no images saved in {image_path}, extract images from video.")
+-                os.makedirs(image_path)
+-                this_count = 0
+-                while video_frames.isOpened():
+-                    ret, video_frame = video_frames.read()
+-                    if this_count >= countss:break
+-                    if ret:
+-                        video_frame = cv2.cvtColor(video_frame, cv2.COLOR_BGR2RGB)
+-                        video_frame = Image.fromarray(video_frame)
+-                        if self.downsample != 1.0:
+-
+-                            img = video_frame.resize(self.img_wh, Image.LANCZOS)
+-                        img.save(os.path.join(image_path,"%04d.png"%count))
+-
+-                        # img = transform(img)
+-                        count += 1
+-                        this_count+=1
+-                    else:
+-                        break
+-                    
+-            images_path = os.listdir(image_path)
+-            images_path.sort()
+-            this_count = 0
+-            for idx, path in enumerate(images_path):
+-                if this_count >=countss:break
+-                image_paths.append(os.path.join(image_path,path))
+-                pose = np.array(self.poses_all[index])
+-                R = pose[:3,:3]
+-                R = -R
+-                R[:,0] = -R[:,0]
+-                T = -pose[:3,3].dot(R)
+-                image_times.append(idx/countss)
+-                image_poses.append((R,T))
+-                # if self.downsample != 1.0:
+-                #     img = video_frame.resize(self.img_wh, Image.LANCZOS)
+-                # img.save(os.path.join(image_path,"%04d.png"%count))
+-                this_count+=1
+-            N_time = len(images_path)
+-
+-                #     video_data_save[count] = img.permute(1,2,0)
+-                #     count += 1
+-        return image_paths, image_poses, image_times, N_cams, N_time
++            N_cams += 1
++            image_path = os.path.join(os.path.splitext(video_path)[0], "images")
++            assert os.path.isdir(image_path), f"{image_path} missing: run extract_frames.py"
++            files = sorted(os.listdir(image_path))[: self.num_frames]
++            assert len(files) == self.num_frames, (image_path, len(files))
++            pose = np.array(self.poses_all[index])
++            R = -pose[:3, :3]
++            R[:, 0] = -R[:, 0]
++            T = -pose[:3, 3].dot(R)
++            for idx, f in enumerate(files):
++                if not self.frame_selected(idx):
++                    continue
++                image_paths.append(os.path.join(image_path, f))
++                image_poses.append((R, T))
++                image_times.append(idx / self.time_denom)
++                self.image_frames.append(idx)
++                self.image_cams.append(index)
++        return image_paths, image_poses, image_times, N_cams, self.num_frames
+     def __len__(self):
+         return len(self.image_paths)
+     def __getitem__(self,index):
+@@ -373,5 +365,4 @@ class Neural3D_NDC_Dataset(Dataset):
+         img = self.transform(img)
+         return img, self.image_poses[index], self.image_times[index]
+     def load_pose(self,index):
+-        return self.image_poses[index]
+-
++        return self.image_poses[index]
+\ No newline at end of file

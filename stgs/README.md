@@ -135,8 +135,9 @@ python $SCR/render_stgs.py --model_path $E/runs/stgs/k2 \
 same one STGS's `test.py` uses. Do not use the metrics from STGS's own `test.py`: it scores cam00 on all 50 frames.
 
 ### 4. Evaluation and figures
-The renders are scored by the team's shared evaluation (same GT, same per-camera dynamic masks for all methods).
-That produces `per_image_<method>.csv` and `summary_all.csv`; the STGS rows are in `results/`. The figures:
+The renders are scored by the shared evaluation [`../4dgs/evaluation/run_all_eval.py`](../4dgs/evaluation/run_all_eval.py)
+(same GT, same per-camera dynamic masks for all methods; see the 4DGS README). That produces `per_image_<method>.csv`
+and `summary_all.csv`; the STGS rows are in `results/`. The figures:
 ```bash
 python $SCR/plot_perframe_k8.py --methods 4dgs stgs --k 8 --eval <dir with per_image_*.csv> --out <figures dir>
 ```

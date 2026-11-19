@@ -1,0 +1,1 @@
+{"definition": "RAFT raft_large, |flow|>1.0px in >=3/49 pairs (t->t+1), blobs<300px removed, 7x7 dilation. Mean dynamic fraction 0.0892 (min 0.0040, max 0.1608)"}
